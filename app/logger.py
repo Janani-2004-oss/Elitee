@@ -1,13 +1,16 @@
 """
-Structured JSON logger.
+Structured JSON logger with Datadog integration.
 
-Every checkout request emits one JSON line to stdout.
-Cloud Run / GCP Logging / Datadog all pick this up automatically.
+- Prints logs to stdout (Render picks this up)
+- Sends logs directly to Datadog via HTTP API
 """
+
 import json
 import logging
 import sys
 import datetime
+import os
+import requests
 from typing import Any
 
 from app.config import settings
@@ -26,23 +29,46 @@ logging.basicConfig(
 _struct_logger = logging.getLogger("struct")
 
 
+# ---------------------------------------------------------------------------
+# Core emit function
+# ---------------------------------------------------------------------------
 def emit(record: dict[str, Any]) -> None:
     """
-    Emit one structured JSON log line to stdout.
+    Emit one structured JSON log line.
 
-    Automatically injects:
-      - timestamp (ISO-8601 UTC)
-      - service name
+    - Sends to stdout (Render logs)
+    - Sends to Datadog (if API key present)
     """
     payload = {
         "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
         "service": settings.service_name,
         **record,
     }
-    # Use print so the line goes straight to stdout with no extra formatting
+
+    # ✅ 1. Print to stdout (for Render / local logs)
     print(json.dumps(payload), flush=True)
 
+    # ✅ 2. Send to Datadog (non-blocking, safe)
+    DATADOG_API_KEY = os.getenv("DATADOG_API_KEY")
 
+    if DATADOG_API_KEY:
+        try:
+            requests.post(
+                "https://http-intake.logs.us5.datadoghq.com/v1/input",
+                headers={
+                    "Content-Type": "application/json",
+                    "DD-API-KEY": DATADOG_API_KEY,
+                },
+                json=payload,
+                timeout=2,  # don't slow down app
+            )
+        except Exception:
+            pass  # never break app due to logging
+
+
+# ---------------------------------------------------------------------------
+# Checkout log helper
+# ---------------------------------------------------------------------------
 def emit_checkout(
     *,
     status_code: int,
@@ -55,7 +81,7 @@ def emit_checkout(
     user_id: int | None,
     email: str | None,
 ) -> None:
-    """Convenience wrapper for /checkout structured logs."""
+    """Structured log for checkout endpoint."""
     emit(
         {
             "event": "checkout_request",
@@ -72,6 +98,9 @@ def emit_checkout(
     )
 
 
+# ---------------------------------------------------------------------------
+# Alert log helper
+# ---------------------------------------------------------------------------
 def emit_alert(payload: dict[str, Any]) -> None:
-    """Log a manual alert payload emission."""
+    """Log alert events."""
     emit({"event": "alert_emitted", **payload})
